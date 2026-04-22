@@ -1,5 +1,5 @@
 # ==============================
-# CUDA N-Body GPU Makefile
+# CUDA N-Body GPU Makefile AI README
 # ==============================
 
 # Compiler
