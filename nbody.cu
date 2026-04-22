@@ -179,6 +179,69 @@ void load_from_file(simulation& s, std::string filename) {
     throw "kaboom";
 }
 
+__global__ void compute_force_kernel(int n, const double* mass,const double *x, 
+		
+		const double* y, const double* z, 
+		
+		double *fx, double *fy, double *fz ) {
+	
+	int i = blockIdx.x * blockDim.x + threadIdx.x;
+	if (i >= n) return; 
+
+	double localfx = 0.0;
+	double localfy = 0.0;
+	double localfz = 0.0;
+
+	const double G = 6.674e-11;
+	const double softening = 0.1;
+
+	for (int j = 0; j < n; ++j){
+		if (i == j) continue;
+		
+		double dx = x[j] - x[i];
+		double dy = y[j] - x[i];
+		double dz = z[j] - z[i];
+
+		double dist_sq = dx * dx + dy * dy + dz*dz;
+		double F = G * mass[i] * mass[j] / (dist_sq + softening);
+
+		double norm = std::sqrt(dx * dx + dy *dy + dz * dz);
+		dx = dx / norm;
+		dz = dy / norm;
+		dz = dz / norm;
+
+		localfx += dx * F;
+		localfy += dy * F;
+		localdz += dz * F;
+	}
+	fx[i] = localfx;
+	fy[i] = localfy; 
+	fz[i] = localfz;
+
+
+}
+
+__global__ void update_kernel(
+	int n, const double* mass, double *x, double *y, double *z,
+	double *vx, double *vy, double *vz, 
+	const double *fx, const double *fy, const double *fz,
+	double dt
+	){
+
+	int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+	if (i >= n) return;
+
+	vx[i] += fx[i] / mass[i] * dt;
+	vy[i] += fy[i] / mass[i] * dt;
+	vz[i] += fz[i] / mass[i] * dt;
+
+	x[i] += vx[i] * dt;
+	y[i] += vy[i] * dt;
+	z[i] += vz[i] * dt;
+
+}
+
 int main(int argc, char* argv[]) {
   if (argc != 6) {
     std::cerr
@@ -194,10 +257,8 @@ int main(int argc, char* argv[]) {
   double dt = std::atof(argv[2]); //in seconds
   size_t nbstep = std::atol(argv[3]);
   size_t printevery = std::atol(argv[4]);
-  int numThreads = std::stoi(argv[5]);
-  OmpLoop loop;
-  loop.setNbThread(numThreads);
-  loop.setGranularity(16);
+  int blocks = std::stoi(argv[5]);
+  
   
   simulation s(1);
 
@@ -219,37 +280,17 @@ int main(int argc, char* argv[]) {
 
   
   for (size_t step = 0; step< nbstep; step++) {
-    if (step %printevery == 0)
+    if (step %printevery == 0) {
+      cudaMemcpy(s.x.data(), d_x)
+
       dump_state(s);
-  
-    reset_force(s);
+      
+      reset_force(s);
 
     
-    loop.parfor(0, s.nbpart, 1, [&](size_t i){
-      double localfx = 0.0;
-      double localfy = 0.0;
-      double localfz = 0.0;
+   
       
-      /* 
-        for each particle first calc the amount of force all other particles induce on particle i
-        We can parallelize this because calculation of the force product of particles is an independent task 
-        that only relies on pos and direction 
-      */
-      for (size_t j=0; j<s.nbpart; ++j)
-        if (i != j)
-          update_force(s, i, j, localfx, localfy, localfz);
-      
-      s.fx[i] = localfx;
-      s.fy[i] = localfy;
-      s.fz[i] = localfz;
-    });
-      
-    // pretty easy to parallize since each particles position is a independent task 
-    loop.parfor(0, s.nbpart, 1, [&](size_t i){
-      apply_force(s, i, dt);
-      update_position(s, i, dt);
-    });
-    
+         
   }
   
   //dump_state(s);  
