@@ -299,9 +299,7 @@ int main(int argc, char* argv[]) {
           dt
       );
 
-      cudaError_t err = cudaGetLastError();
-      if (err != cudaSuccess)
-          std::cerr << cudaGetErrorString(err) << '\n';
+     
       cudaDeviceSynchronize();
   }
   

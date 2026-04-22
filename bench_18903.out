@@ -1,0 +1,14 @@
+===== GPU N-Body Benchmark Results =====
+Node: gal-gpu1.charlotte.edu
+Date: Wed Apr 22 04:59:17 PM EDT 2026
+
+Running GPU test with 1000 particles...
+Output written to: results/gpu_1000.log
+
+Running GPU test with 10000 particles...
+Output written to: results/gpu_10000.log
+
+Running GPU test with 100000 particles...
+Output written to: results/gpu_100000.log
+
+All GPU benchmark tests completed.
