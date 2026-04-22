@@ -2,9 +2,9 @@
 #include <fstream>
 #include <random>
 #include <cmath>
-#include "omp_loop.hpp"
+#include <cuda_runtime.h>
+#include <vector>
 
-double G = 6.674*std::pow(10,-11);
 //double G = 1;
 
 struct simulation {
@@ -108,30 +108,6 @@ void init_solar(simulation& s) {
   s.vz = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 }
 
-//meant to update the force that from applies on to
-void update_force(const simulation& s, size_t from, size_t to, double& localfx, double& localfy, double& localfz) {
-  double softening = .1;
-  double dist_sq = std::pow(s.x[from]-s.x[to],2)
-    + std::pow(s.y[from]-s.y[to],2)
-    + std::pow(s.z[from]-s.z[to],2);
-  double F = G * s.mass[from]*s.mass[to]/(dist_sq+softening); //that the strength of the force
-
-  //direction
-  double dx = s.x[to]-s.x[from];
-  double dy = s.y[to]-s.y[from];
-  double dz = s.z[to]-s.z[from];
-  double norm = std::sqrt(dx*dx+dy*dy+dz*dz);
-  
-  dx = dx/norm;
-  dy = dy/norm;
-  dz = dz/norm;
-
-  //apply force
-  localfx += dx*F;
-  localfy += dy*F;
-  localfz += dz*F;
-  
-}
 
 void reset_force(simulation& s) {
   for (size_t i=0; i<s.nbpart; ++i) {
@@ -141,17 +117,6 @@ void reset_force(simulation& s) {
   }
 }
 
-void apply_force(simulation& s, size_t i, double dt) {
-  s.vx[i] += s.fx[i]/s.mass[i]*dt;
-  s.vy[i] += s.fy[i]/s.mass[i]*dt;
-  s.vz[i] += s.fz[i]/s.mass[i]*dt;
-}
-
-void update_position(simulation& s, size_t i, double dt) {
-  s.x[i] += s.vx[i]*dt;
-  s.y[i] += s.vy[i]*dt;
-  s.z[i] += s.vz[i]*dt;
-}
 
 void dump_state(simulation& s) {
   std::cout<<s.nbpart<<'\t';
@@ -199,20 +164,20 @@ __global__ void compute_force_kernel(int n, const double* mass,const double *x,
 		if (i == j) continue;
 		
 		double dx = x[j] - x[i];
-		double dy = y[j] - x[i];
+		double dy = y[j] - y[i];
 		double dz = z[j] - z[i];
 
-		double dist_sq = dx * dx + dy * dy + dz*dz;
-		double F = G * mass[i] * mass[j] / (dist_sq + softening);
-
-		double norm = std::sqrt(dx * dx + dy *dy + dz * dz);
+    double dist_sq = dx * dx + dy * dy + dz * dz;
+		double softened = dist_sq + softening;
+    double F = G * mass[i] * mass[j] / softened;
+    double norm = sqrt(softened);
 		dx = dx / norm;
-		dz = dy / norm;
+		dy = dy / norm;
 		dz = dz / norm;
 
 		localfx += dx * F;
 		localfy += dy * F;
-		localdz += dz * F;
+		localfz += dz * F;
 	}
 	fx[i] = localfx;
 	fy[i] = localfy; 
@@ -257,7 +222,8 @@ int main(int argc, char* argv[]) {
   double dt = std::atof(argv[2]); //in seconds
   size_t nbstep = std::atol(argv[3]);
   size_t printevery = std::atol(argv[4]);
-  int blocks = std::stoi(argv[5]);
+  int blockSize = std::stoi(argv[5]);
+  
   
   
   simulation s(1);
@@ -277,24 +243,79 @@ int main(int argc, char* argv[]) {
       }
     }    
   }
+  int blocks = (s.nbpart + blockSize - 1) / blockSize;
+  double *d_mass, *d_x, *d_y, *d_z;
+  double *d_vx, *d_vy, *d_vz;
+  double *d_fx, *d_fy, *d_fz;
 
-  
-  for (size_t step = 0; step< nbstep; step++) {
-    if (step %printevery == 0) {
-      cudaMemcpy(s.x.data(), d_x)
+  int n = s.nbpart;
 
-      dump_state(s);
-      
-      reset_force(s);
+  cudaMalloc(&d_mass, n * sizeof(double));
+  cudaMalloc(&d_x,    n * sizeof(double));
+  cudaMalloc(&d_y,    n * sizeof(double));
+  cudaMalloc(&d_z,    n * sizeof(double));
+  cudaMalloc(&d_vx,   n * sizeof(double));
+  cudaMalloc(&d_vy,   n * sizeof(double));
+  cudaMalloc(&d_vz,   n * sizeof(double));
+  cudaMalloc(&d_fx,   n * sizeof(double));
+  cudaMalloc(&d_fy,   n * sizeof(double));
+  cudaMalloc(&d_fz,   n * sizeof(double));
 
-    
-   
-      
-         
+  cudaMemcpy(d_mass, s.mass.data(), n * sizeof(double), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_x,    s.x.data(),    n * sizeof(double), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_y,    s.y.data(),    n * sizeof(double), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_z,    s.z.data(),    n * sizeof(double), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_vx,   s.vx.data(),   n * sizeof(double), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_vy,   s.vy.data(),   n * sizeof(double), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_vz,   s.vz.data(),   n * sizeof(double), cudaMemcpyHostToDevice);
+  dump_state(s);
+  for (size_t step = 0; step < nbstep; step++) {
+      if (step > 0 && step % printevery == 0) {
+          cudaMemcpy(s.x.data(),  d_x,  s.nbpart * sizeof(double), cudaMemcpyDeviceToHost);
+          cudaMemcpy(s.y.data(),  d_y,  s.nbpart * sizeof(double), cudaMemcpyDeviceToHost);
+          cudaMemcpy(s.z.data(),  d_z,  s.nbpart * sizeof(double), cudaMemcpyDeviceToHost);
+          cudaMemcpy(s.vx.data(), d_vx, s.nbpart * sizeof(double), cudaMemcpyDeviceToHost);
+          cudaMemcpy(s.vy.data(), d_vy, s.nbpart * sizeof(double), cudaMemcpyDeviceToHost);
+          cudaMemcpy(s.vz.data(), d_vz, s.nbpart * sizeof(double), cudaMemcpyDeviceToHost);
+          cudaMemcpy(s.fx.data(), d_fx, s.nbpart * sizeof(double), cudaMemcpyDeviceToHost);
+          cudaMemcpy(s.fy.data(), d_fy, s.nbpart * sizeof(double), cudaMemcpyDeviceToHost);
+          cudaMemcpy(s.fz.data(), d_fz, s.nbpart * sizeof(double), cudaMemcpyDeviceToHost);
+
+          dump_state(s);
+      }
+
+      compute_force_kernel<<<blocks, blockSize>>>(
+          s.nbpart, d_mass, d_x, d_y, d_z, d_fx, d_fy, d_fz
+      );
+      cudaError_t err = cudaGetLastError();
+      if (err != cudaSuccess)
+          std::cerr << cudaGetErrorString(err) << '\n';
+
+      update_kernel<<<blocks, blockSize>>>(
+          s.nbpart, d_mass,
+          d_x, d_y, d_z,
+          d_vx, d_vy, d_vz,
+          d_fx, d_fy, d_fz,
+          dt
+      );
+
+      cudaError_t err = cudaGetLastError();
+      if (err != cudaSuccess)
+          std::cerr << cudaGetErrorString(err) << '\n';
+      cudaDeviceSynchronize();
   }
   
   //dump_state(s);  
 
-
+  cudaFree(d_mass);
+  cudaFree(d_x);
+  cudaFree(d_y);
+  cudaFree(d_z);
+  cudaFree(d_vx);
+  cudaFree(d_vy);
+  cudaFree(d_vz);
+  cudaFree(d_fx);
+  cudaFree(d_fy);
+  cudaFree(d_fz);
   return 0;
 }
