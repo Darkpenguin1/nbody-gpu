@@ -1,4 +1,4 @@
-CXXFLAGS=-O3
+CXXFLAGS=-O3 -fopenmp
 
 nbody: nbody.cpp
 	g++ -O3 nbody.cpp -o nbody
